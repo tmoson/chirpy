@@ -1,11 +1,15 @@
 package main
 
 import (
+	"database/sql"
 	"fmt"
 	"regexp"
 
 	"encoding/json"
 	"net/http"
+
+	"github.com/google/uuid"
+	"github.com/tmoson/chirpy/internal/database"
 )
 
 type ChirpyServer struct {
@@ -27,7 +31,12 @@ func (cs *ChirpyServer) runServer() error {
 }
 
 type DefaultRequestBody struct {
-	Body string `json:"body"`
+	Body   string    `json:"body"`
+	UserID uuid.UUID `json:"user_id"`
+}
+
+type NewUserRequest struct {
+	Email string `json:"email"`
 }
 
 type ErrorResponse struct {
@@ -68,7 +77,7 @@ func sensorPost(s string) string {
 	return sensored
 }
 
-func chirpPostHandler() http.Handler {
+func chirpPostHandler(server *ChirpyServer) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body := DefaultRequestBody{}
 		decoder := json.NewDecoder(r.Body)
@@ -91,22 +100,100 @@ func chirpPostHandler() http.Handler {
 			w.Write(rBody)
 			return
 		}
-		valid := CleanedChirp{
-			CleanedBody: sensorPost(body.Body),
+		post, err := server.Api.dbQueries.CreatePost(r.Context(), database.CreatePostParams{
+			Body:   sensorPost(body.Body),
+			UserID: body.UserID,
+		})
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
 		}
-		respBody, err := json.Marshal(valid)
+		respBody, err := json.Marshal(post)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(200)
+		w.WriteHeader(http.StatusCreated)
 		w.Write(respBody)
 	})
 }
 
-func defaultChirpyServer() *ChirpyServer {
+func handleNewUser(server *ChirpyServer) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		newUserBody := NewUserRequest{}
+		decoder := json.NewDecoder(r.Body)
+		err := decoder.Decode(&newUserBody)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		newUser, err := server.Api.dbQueries.CreateUser(r.Context(), newUserBody.Email)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		response, err := json.Marshal(newUser)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(response)
+	})
+}
+
+func getAllChirps(server *ChirpyServer) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		posts, err := server.Api.dbQueries.GetAllPosts(r.Context())
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		postResponse, err := json.Marshal(posts)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(postResponse)
+	})
+}
+
+func getChirp(server *ChirpyServer) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		chirpID := r.PathValue("id")
+		if chirpID == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		chirpUUID, err := uuid.Parse(chirpID)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		chirp, err := server.Api.dbQueries.GetPost(r.Context(), chirpUUID)
+		if err != nil {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		chirpJSON, err := json.Marshal(chirp)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(chirpJSON)
+	})
+}
+
+func defaultChirpyServer(db *sql.DB, platform string) *ChirpyServer {
 	chirpy := newChirpyServer("8080")
+	chirpy.Api.dbQueries = database.New(db)
+	chirpy.Api.platform = platform
 	chirpy.registerHandlerFunction("GET /api/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Header().Add("content-type", "text/plain")
@@ -121,6 +208,9 @@ func defaultChirpyServer() *ChirpyServer {
 		w.Write([]byte(fmt.Sprintf("<html>\n  <body>\n    <h1>Welcome, Chirpy Admin</h1>\n    <p>Chirpy has been visited %d times!</p>\n  </body>\n</html>", chirpy.Api.fileserverHits.Load())))
 	})
 	chirpy.registerHandler("POST /admin/reset", chirpy.Api.metricsReset())
-	chirpy.registerHandler("POST /api/validate_chirp", chirpPostHandler())
+	chirpy.registerHandler("POST /api/chirps", chirpPostHandler(chirpy))
+	chirpy.registerHandler("POST /api/users", handleNewUser(chirpy))
+	chirpy.registerHandler("GET /api/chirps", getAllChirps(chirpy))
+	chirpy.registerHandler("GET /api/chirps/{id}", getChirp(chirpy))
 	return chirpy
 }

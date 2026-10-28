@@ -3,6 +3,8 @@ package main
 import (
 	"net/http"
 	"sync/atomic"
+
+	"github.com/tmoson/chirpy/internal/database"
 )
 
 type statusRecorder struct {
@@ -36,6 +38,8 @@ func (rec *statusRecorder) Write(b []byte) (int, error) {
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
+	dbQueries      *database.Queries
+	platform       string
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -50,6 +54,11 @@ func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 
 func (cfg *apiConfig) metricsReset() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		err := cfg.dbQueries.ResetUsers(r.Context())
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 		cfg.fileserverHits.Store(0)
 		w.WriteHeader(http.StatusOK)
 		w.Header().Add("content-type", "text/plain")
