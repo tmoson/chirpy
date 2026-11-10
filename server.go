@@ -9,6 +9,7 @@ import (
 	"net/http"
 
 	"github.com/google/uuid"
+	"github.com/tmoson/chirpy/internal/auth"
 	"github.com/tmoson/chirpy/internal/database"
 )
 
@@ -36,7 +37,8 @@ type DefaultRequestBody struct {
 }
 
 type NewUserRequest struct {
-	Email string `json:"email"`
+	Email    string `json:"email"`
+	Password string `json:"password"`
 }
 
 type ErrorResponse struct {
@@ -128,7 +130,15 @@ func handleNewUser(server *ChirpyServer) http.Handler {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-		newUser, err := server.Api.dbQueries.CreateUser(r.Context(), newUserBody.Email)
+		passwordHash, err := auth.HashPassword(newUserBody.Password)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		newUser, err := server.Api.dbQueries.CreateUser(r.Context(), database.CreateUserParams{
+			Email:          newUserBody.Email,
+			HashedPassword: passwordHash,
+		})
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
@@ -139,6 +149,49 @@ func handleNewUser(server *ChirpyServer) http.Handler {
 			return
 		}
 		w.WriteHeader(http.StatusCreated)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(response)
+	})
+}
+
+func loginUser(server *ChirpyServer) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		userBody := NewUserRequest{}
+		decoder := json.NewDecoder(r.Body)
+		err := decoder.Decode(&userBody)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		user, err := server.Api.dbQueries.GetUser(r.Context(), userBody.Email)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		passwordMatch, err := auth.CheckPasswordHash(userBody.Password, user.HashedPassword)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		if passwordMatch {
+			response, err := json.Marshal(user)
+			if err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			w.Header().Set("Content-Type", "application/json")
+			w.Write(response)
+			return
+		}
+		response, err := json.Marshal(ErrorResponse{
+			Error: "Incorrect email or password",
+		})
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
 		w.Header().Set("Content-Type", "application/json")
 		w.Write(response)
 	})
@@ -190,27 +243,32 @@ func getChirp(server *ChirpyServer) http.Handler {
 	})
 }
 
+func getAdminMetrics(server *ChirpyServer) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Header().Add("content-type", "text/html")
+		w.Write([]byte(fmt.Sprintf("<html>\n  <body>\n    <h1>Welcome, Chirpy Admin</h1>\n    <p>Chirpy has been visited %d times!</p>\n  </body>\n</html>", server.Api.fileserverHits.Load())))
+	})
+}
+
 func defaultChirpyServer(db *sql.DB, platform string) *ChirpyServer {
 	chirpy := newChirpyServer("8080")
 	chirpy.Api.dbQueries = database.New(db)
 	chirpy.Api.platform = platform
-	chirpy.registerHandlerFunction("GET /api/healthz", func(w http.ResponseWriter, r *http.Request) {
+	chirpy.registerHandler("GET /api/healthz", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Header().Add("content-type", "text/plain")
 		w.Write([]byte("OK"))
-	})
+	}))
 	chirpy.registerHandler(
 		"/app/",
 		chirpy.Api.middlewareMetricsInc(http.StripPrefix("/app", http.FileServer(http.Dir(".")))))
-	chirpy.registerHandlerFunction("GET /admin/metrics", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Header().Add("content-type", "text/html")
-		w.Write([]byte(fmt.Sprintf("<html>\n  <body>\n    <h1>Welcome, Chirpy Admin</h1>\n    <p>Chirpy has been visited %d times!</p>\n  </body>\n</html>", chirpy.Api.fileserverHits.Load())))
-	})
+	chirpy.registerHandler("GET /admin/metrics", getAdminMetrics(chirpy))
 	chirpy.registerHandler("POST /admin/reset", chirpy.Api.metricsReset())
 	chirpy.registerHandler("POST /api/chirps", chirpPostHandler(chirpy))
 	chirpy.registerHandler("POST /api/users", handleNewUser(chirpy))
 	chirpy.registerHandler("GET /api/chirps", getAllChirps(chirpy))
 	chirpy.registerHandler("GET /api/chirps/{id}", getChirp(chirpy))
+	chirpy.registerHandler("POST /api/login", loginUser(chirpy))
 	return chirpy
 }
