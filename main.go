@@ -20,6 +20,10 @@ func main() {
 	if platform == "" {
 		platform = "prod"
 	}
-	chirpy := defaultChirpyServer(db, platform)
+	jwtSecret := os.Getenv("JWT_SECRET")
+	if jwtSecret == "" {
+		log.Fatal("Need signing secret for tokens")
+	}
+	chirpy := defaultChirpyServer(db, platform, jwtSecret)
 	log.Fatal(chirpy.runServer())
 }

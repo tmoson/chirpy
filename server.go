@@ -2,12 +2,15 @@ package main
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"regexp"
+	"time"
 
 	"encoding/json"
 	"net/http"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/tmoson/chirpy/internal/auth"
 	"github.com/tmoson/chirpy/internal/database"
@@ -32,13 +35,26 @@ func (cs *ChirpyServer) runServer() error {
 }
 
 type DefaultRequestBody struct {
-	Body   string    `json:"body"`
-	UserID uuid.UUID `json:"user_id"`
+	Body string `json:"body"`
 }
 
 type NewUserRequest struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
+}
+
+type UserLoginRequest struct {
+	Email            string `json:"email"`
+	Password         string `json:"password"`
+	ExpiresInSeconds int    `json:"expires_in_seconds,omitempty"`
+}
+
+type UserLoginResponse struct {
+	ID        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Email     string    `json:"email"`
+	Token     string    `json:"token"`
 }
 
 type ErrorResponse struct {
@@ -81,9 +97,23 @@ func sensorPost(s string) string {
 
 func chirpPostHandler(server *ChirpyServer) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		userToken, err := auth.GetBearerToken(r.Header)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		userID, err := auth.ValidateJWT(userToken, server.Api.jwtSecret)
+		if err != nil {
+			if errors.Is(err, jwt.ErrTokenExpired) {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 		body := DefaultRequestBody{}
 		decoder := json.NewDecoder(r.Body)
-		err := decoder.Decode(&body)
+		err = decoder.Decode(&body)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
@@ -104,7 +134,7 @@ func chirpPostHandler(server *ChirpyServer) http.Handler {
 		}
 		post, err := server.Api.dbQueries.CreatePost(r.Context(), database.CreatePostParams{
 			Body:   sensorPost(body.Body),
-			UserID: body.UserID,
+			UserID: userID,
 		})
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
@@ -156,7 +186,7 @@ func handleNewUser(server *ChirpyServer) http.Handler {
 
 func loginUser(server *ChirpyServer) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		userBody := NewUserRequest{}
+		userBody := UserLoginRequest{}
 		decoder := json.NewDecoder(r.Body)
 		err := decoder.Decode(&userBody)
 		if err != nil {
@@ -174,7 +204,30 @@ func loginUser(server *ChirpyServer) http.Handler {
 			return
 		}
 		if passwordMatch {
-			response, err := json.Marshal(user)
+			tokenDuration, err := time.ParseDuration("1h")
+			if err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			if userBody.ExpiresInSeconds > 0 && userBody.ExpiresInSeconds < 3600 {
+				tokenDuration, err = time.ParseDuration(fmt.Sprintf("%ds", userBody.ExpiresInSeconds))
+				if err != nil {
+					w.WriteHeader(http.StatusInternalServerError)
+					return
+				}
+			}
+			token, err := auth.MakeJWT(user.ID, server.Api.jwtSecret, tokenDuration)
+			if err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			response, err := json.Marshal(UserLoginResponse{
+				ID:        user.ID,
+				CreatedAt: user.CreatedAt,
+				UpdatedAt: user.UpdatedAt,
+				Email:     user.Email,
+				Token:     token,
+			})
 			if err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
 				return
@@ -251,10 +304,11 @@ func getAdminMetrics(server *ChirpyServer) http.Handler {
 	})
 }
 
-func defaultChirpyServer(db *sql.DB, platform string) *ChirpyServer {
+func defaultChirpyServer(db *sql.DB, platform string, jwtSecret string) *ChirpyServer {
 	chirpy := newChirpyServer("8080")
 	chirpy.Api.dbQueries = database.New(db)
 	chirpy.Api.platform = platform
+	chirpy.Api.jwtSecret = jwtSecret
 	chirpy.registerHandler("GET /api/healthz", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Header().Add("content-type", "text/plain")
