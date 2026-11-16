@@ -44,17 +44,21 @@ type NewUserRequest struct {
 }
 
 type UserLoginRequest struct {
-	Email            string `json:"email"`
-	Password         string `json:"password"`
-	ExpiresInSeconds int    `json:"expires_in_seconds,omitempty"`
+	Email    string `json:"email"`
+	Password string `json:"password"`
 }
 
 type UserLoginResponse struct {
-	ID        uuid.UUID `json:"id"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	Email     string    `json:"email"`
-	Token     string    `json:"token"`
+	ID           uuid.UUID `json:"id"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	Email        string    `json:"email"`
+	Token        string    `json:"token"`
+	RefreshToken string    `json:"refresh_token"`
+}
+
+type UserRefreshResponse struct {
+	Token string `json:"token"`
 }
 
 type ErrorResponse struct {
@@ -104,7 +108,7 @@ func chirpPostHandler(server *ChirpyServer) http.Handler {
 		}
 		userID, err := auth.ValidateJWT(userToken, server.Api.jwtSecret)
 		if err != nil {
-			if errors.Is(err, jwt.ErrTokenExpired) {
+			if errors.Is(err, jwt.ErrTokenExpired) || errors.Is(err, jwt.ErrTokenMalformed) || errors.Is(err, jwt.ErrTokenInvalidClaims) {
 				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}
@@ -209,24 +213,29 @@ func loginUser(server *ChirpyServer) http.Handler {
 				w.WriteHeader(http.StatusInternalServerError)
 				return
 			}
-			if userBody.ExpiresInSeconds > 0 && userBody.ExpiresInSeconds < 3600 {
-				tokenDuration, err = time.ParseDuration(fmt.Sprintf("%ds", userBody.ExpiresInSeconds))
-				if err != nil {
-					w.WriteHeader(http.StatusInternalServerError)
-					return
-				}
-			}
 			token, err := auth.MakeJWT(user.ID, server.Api.jwtSecret, tokenDuration)
 			if err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
 				return
 			}
+			refreshToken := auth.MakeRefreshToken()
+			refreshDuration, err := time.ParseDuration("1440h")
+			if err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			_, err = server.Api.dbQueries.StoreToken(r.Context(), database.StoreTokenParams{
+				Token:     refreshToken,
+				ExpiresAt: time.Now().UTC().Add(refreshDuration),
+				UserID:    user.ID,
+			})
 			response, err := json.Marshal(UserLoginResponse{
-				ID:        user.ID,
-				CreatedAt: user.CreatedAt,
-				UpdatedAt: user.UpdatedAt,
-				Email:     user.Email,
-				Token:     token,
+				ID:           user.ID,
+				CreatedAt:    user.CreatedAt,
+				UpdatedAt:    user.UpdatedAt,
+				Email:        user.Email,
+				Token:        token,
+				RefreshToken: refreshToken,
 			})
 			if err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
@@ -247,6 +256,70 @@ func loginUser(server *ChirpyServer) http.Handler {
 		w.WriteHeader(http.StatusUnauthorized)
 		w.Header().Set("Content-Type", "application/json")
 		w.Write(response)
+	})
+}
+
+func refreshToken(server *ChirpyServer) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token, err := auth.GetBearerToken(r.Header)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		refreshToken, err := server.Api.dbQueries.GetToken(r.Context(), token)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		tokenDuration, err := time.ParseDuration("1h")
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		newToken, err := auth.MakeJWT(refreshToken.UserID, server.Api.jwtSecret, tokenDuration)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		newTokenResponse, err := json.Marshal(UserRefreshResponse{
+			Token: newToken,
+		})
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(newTokenResponse)
+	})
+}
+
+func revokeToken(server *ChirpyServer) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token, err := auth.GetBearerToken(r.Header)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		_, err = server.Api.dbQueries.GetToken(r.Context(), token)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		err = server.Api.dbQueries.RevokeToken(r.Context(), token)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 	})
 }
 
@@ -324,5 +397,7 @@ func defaultChirpyServer(db *sql.DB, platform string, jwtSecret string) *ChirpyS
 	chirpy.registerHandler("GET /api/chirps", getAllChirps(chirpy))
 	chirpy.registerHandler("GET /api/chirps/{id}", getChirp(chirpy))
 	chirpy.registerHandler("POST /api/login", loginUser(chirpy))
+	chirpy.registerHandler("POST /api/refresh", refreshToken(chirpy))
+	chirpy.registerHandler("POST /api/revoke", revokeToken(chirpy))
 	return chirpy
 }

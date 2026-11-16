@@ -6,6 +6,8 @@ import (
 	"strings"
 	"time"
 
+	"crypto/rand"
+	"encoding/hex"
 	"github.com/alexedwards/argon2id"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
@@ -55,7 +57,7 @@ func ValidateJWT(tokenString, tokenSecret string) (uuid.UUID, error) {
 		}
 		return userID, nil
 	}
-	return uuid.UUID{}, errors.New("Unable to parse token claims")
+	return uuid.UUID{}, jwt.ErrTokenInvalidClaims
 }
 
 func GetBearerToken(headers http.Header) (string, error) {
@@ -68,4 +70,10 @@ func GetBearerToken(headers http.Header) (string, error) {
 		return "", errors.New("Malformatted header")
 	}
 	return bearerStringSplit[1], nil
+}
+
+func MakeRefreshToken() string {
+	randKey := make([]byte, 32)
+	rand.Read(randKey)
+	return hex.EncodeToString(randKey)
 }
