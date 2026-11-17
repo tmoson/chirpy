@@ -57,6 +57,13 @@ type UserLoginResponse struct {
 	RefreshToken string    `json:"refresh_token"`
 }
 
+type UpdateUserResponse struct {
+	ID        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Email     string    `json:"email"`
+}
+
 type UserRefreshResponse struct {
 	Token string `json:"token"`
 }
@@ -323,6 +330,55 @@ func revokeToken(server *ChirpyServer) http.Handler {
 	})
 }
 
+func UpdateUser(server *ChirpyServer) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token, err := auth.GetBearerToken(r.Header)
+		if err != nil {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		userID, err := auth.ValidateJWT(token, server.Api.jwtSecret)
+		if err != nil {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		passwordRequest := UserLoginRequest{}
+		decoder := json.NewDecoder(r.Body)
+		err = decoder.Decode(&passwordRequest)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		hashedPassword, err := auth.HashPassword(passwordRequest.Password)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		newUser, err := server.Api.dbQueries.UpdateUserEmailAndPassword(r.Context(), database.UpdateUserEmailAndPasswordParams{
+			ID:             userID,
+			HashedPassword: hashedPassword,
+			Email:          passwordRequest.Email,
+		})
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		updateResponse, err := json.Marshal(UpdateUserResponse{
+			ID:        newUser.ID,
+			CreatedAt: newUser.CreatedAt,
+			UpdatedAt: newUser.UpdatedAt,
+			Email:     newUser.Email,
+		})
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(updateResponse)
+	})
+}
+
 func getAllChirps(server *ChirpyServer) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		posts, err := server.Api.dbQueries.GetAllPosts(r.Context())
@@ -369,6 +425,50 @@ func getChirp(server *ChirpyServer) http.Handler {
 	})
 }
 
+func deleteChirp(server *ChirpyServer) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bearerToken, err := auth.GetBearerToken(r.Header)
+		if err != nil {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		userID, err := auth.ValidateJWT(bearerToken, server.Api.jwtSecret)
+		if err != nil {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		chirpID := r.PathValue("id")
+		if chirpID == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		chirpUUID, err := uuid.Parse(chirpID)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		chirp, err := server.Api.dbQueries.GetPost(r.Context(), chirpUUID)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		if chirp.UserID != userID {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		err = server.Api.dbQueries.DeletePost(r.Context(), chirp.ID)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+}
+
 func getAdminMetrics(server *ChirpyServer) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -399,5 +499,7 @@ func defaultChirpyServer(db *sql.DB, platform string, jwtSecret string) *ChirpyS
 	chirpy.registerHandler("POST /api/login", loginUser(chirpy))
 	chirpy.registerHandler("POST /api/refresh", refreshToken(chirpy))
 	chirpy.registerHandler("POST /api/revoke", revokeToken(chirpy))
+	chirpy.registerHandler("PUT /api/users", UpdateUser(chirpy))
+	chirpy.registerHandler("DELETE /api/chirps/{id}", deleteChirp(chirpy))
 	return chirpy
 }
