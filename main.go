@@ -24,6 +24,10 @@ func main() {
 	if jwtSecret == "" {
 		log.Fatal("Need signing secret for tokens")
 	}
-	chirpy := defaultChirpyServer(db, platform, jwtSecret)
+	polkaKey := os.Getenv("POLKA_KEY")
+	if polkaKey == "" {
+		log.Fatal("Need polka api key for payment processing")
+	}
+	chirpy := defaultChirpyServer(db, platform, jwtSecret, polkaKey)
 	log.Fatal(chirpy.runServer())
 }

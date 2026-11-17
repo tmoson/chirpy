@@ -51,6 +51,9 @@ func ValidateJWT(tokenString, tokenSecret string) (uuid.UUID, error) {
 		return uuid.UUID{}, err
 	}
 	if claims, ok := token.Claims.(*jwt.RegisteredClaims); ok {
+		if claims.ExpiresAt.Time.Before(time.Now()) {
+			return uuid.UUID{}, jwt.ErrTokenExpired
+		}
 		userID, err := uuid.Parse(claims.Subject)
 		if err != nil {
 			return uuid.UUID{}, err
@@ -76,4 +79,16 @@ func MakeRefreshToken() string {
 	randKey := make([]byte, 32)
 	rand.Read(randKey)
 	return hex.EncodeToString(randKey)
+}
+
+func GetAPIKey(headers http.Header) (string, error) {
+	authHeader := headers.Get("Authorization")
+	if authHeader == "" {
+		return "", errors.New("Authorization header missing")
+	}
+	apiKeySplit := strings.Split(authHeader, " ")
+	if len(apiKeySplit) != 2 {
+		return "", errors.New("Malformed Authorization header")
+	}
+	return apiKeySplit[1], nil
 }

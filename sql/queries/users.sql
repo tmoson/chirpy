@@ -5,7 +5,7 @@ VALUES (
   $1,
   $2
 )
-RETURNING *;
+RETURNING id, created_at, updated_at, email, is_chirpy_red;
 
 -- name: UpdateUserEmailAndPassword :one
 UPDATE users
@@ -21,6 +21,11 @@ WHERE email = $1;
 -- name: GetUserByID :one
 SELECT *
 FROM users
+WHERE id = $1;
+
+-- name: UpgradeUserToRed :exec
+UPDATE users
+SET is_chirpy_red = true, updated_at = now()
 WHERE id = $1;
 
 -- name: ResetUsers :exec

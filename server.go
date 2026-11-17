@@ -55,13 +55,22 @@ type UserLoginResponse struct {
 	Email        string    `json:"email"`
 	Token        string    `json:"token"`
 	RefreshToken string    `json:"refresh_token"`
+	IsChirpyRed  bool      `json:"is_chirpy_red"`
 }
 
 type UpdateUserResponse struct {
-	ID        uuid.UUID `json:"id"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	Email     string    `json:"email"`
+	ID          uuid.UUID `json:"id"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	Email       string    `json:"email"`
+	IsChirpyRed bool      `json:"is_chirpy_red"`
+}
+
+type UserUpgradeRequest struct {
+	Event string `json:"event"`
+	Data  struct {
+		UserID string `json:"user_id"`
+	} `json:"data"`
 }
 
 type UserRefreshResponse struct {
@@ -243,6 +252,7 @@ func loginUser(server *ChirpyServer) http.Handler {
 				Email:        user.Email,
 				Token:        token,
 				RefreshToken: refreshToken,
+				IsChirpyRed:  user.IsChirpyRed,
 			})
 			if err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
@@ -330,7 +340,7 @@ func revokeToken(server *ChirpyServer) http.Handler {
 	})
 }
 
-func UpdateUser(server *ChirpyServer) http.Handler {
+func updateUser(server *ChirpyServer) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token, err := auth.GetBearerToken(r.Header)
 		if err != nil {
@@ -364,10 +374,11 @@ func UpdateUser(server *ChirpyServer) http.Handler {
 			return
 		}
 		updateResponse, err := json.Marshal(UpdateUserResponse{
-			ID:        newUser.ID,
-			CreatedAt: newUser.CreatedAt,
-			UpdatedAt: newUser.UpdatedAt,
-			Email:     newUser.Email,
+			ID:          newUser.ID,
+			CreatedAt:   newUser.CreatedAt,
+			UpdatedAt:   newUser.UpdatedAt,
+			Email:       newUser.Email,
+			IsChirpyRed: newUser.IsChirpyRed,
 		})
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
@@ -376,6 +387,44 @@ func UpdateUser(server *ChirpyServer) http.Handler {
 		w.WriteHeader(http.StatusOK)
 		w.Header().Set("Content-Type", "application/json")
 		w.Write(updateResponse)
+	})
+}
+
+func upgradeUserToRed(server *ChirpyServer) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		polkaKey, err := auth.GetAPIKey(r.Header)
+		if err != nil {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if polkaKey != server.Api.polkaKey {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		hookEvent := UserUpgradeRequest{}
+		decoder := json.NewDecoder(r.Body)
+		err = decoder.Decode(&hookEvent)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		if hookEvent.Event == "user.upgraded" {
+			userID, err := uuid.Parse(hookEvent.Data.UserID)
+			if err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			err = server.Api.dbQueries.UpgradeUserToRed(r.Context(), userID)
+			if err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+		}
+		w.WriteHeader(http.StatusNoContent)
 	})
 }
 
@@ -477,11 +526,12 @@ func getAdminMetrics(server *ChirpyServer) http.Handler {
 	})
 }
 
-func defaultChirpyServer(db *sql.DB, platform string, jwtSecret string) *ChirpyServer {
+func defaultChirpyServer(db *sql.DB, platform string, jwtSecret string, polkaKey string) *ChirpyServer {
 	chirpy := newChirpyServer("8080")
 	chirpy.Api.dbQueries = database.New(db)
 	chirpy.Api.platform = platform
 	chirpy.Api.jwtSecret = jwtSecret
+	chirpy.Api.polkaKey = polkaKey
 	chirpy.registerHandler("GET /api/healthz", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Header().Add("content-type", "text/plain")
@@ -499,7 +549,8 @@ func defaultChirpyServer(db *sql.DB, platform string, jwtSecret string) *ChirpyS
 	chirpy.registerHandler("POST /api/login", loginUser(chirpy))
 	chirpy.registerHandler("POST /api/refresh", refreshToken(chirpy))
 	chirpy.registerHandler("POST /api/revoke", revokeToken(chirpy))
-	chirpy.registerHandler("PUT /api/users", UpdateUser(chirpy))
+	chirpy.registerHandler("PUT /api/users", updateUser(chirpy))
 	chirpy.registerHandler("DELETE /api/chirps/{id}", deleteChirp(chirpy))
+	chirpy.registerHandler("POST /api/polka/webhooks", upgradeUserToRed(chirpy))
 	return chirpy
 }
