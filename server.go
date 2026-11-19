@@ -430,7 +430,26 @@ func upgradeUserToRed(server *ChirpyServer) http.Handler {
 
 func getAllChirps(server *ChirpyServer) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		posts, err := server.Api.dbQueries.GetAllPosts(r.Context())
+		params := r.URL.Query()
+		sorting := params.Get("sort")
+		if sorting == "" {
+			sorting = "asc"
+		}
+		var posts []database.Chirp
+		var err error
+		if params.Has("author_id") {
+			userID, err := uuid.Parse(params.Get("author_id"))
+			if err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			posts, err = server.Api.dbQueries.GetAllPostsByAuthor(r.Context(), database.GetAllPostsByAuthorParams{
+				UserID:  userID,
+				SortDir: sorting,
+			})
+		} else {
+			posts, err = server.Api.dbQueries.GetAllPosts(r.Context(), sorting)
+		}
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			return

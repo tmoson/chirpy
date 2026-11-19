@@ -50,11 +50,59 @@ func (q *Queries) DeletePost(ctx context.Context, id uuid.UUID) error {
 
 const getAllPosts = `-- name: GetAllPosts :many
 SELECT id, created_at, updated_at, body, user_id
-FROM chirps ORDER BY chirps.created_at
+FROM chirps
+ORDER BY
+CASE WHEN $1::text = 'asc' THEN chirps.created_at END ASC,
+CASE WHEN $1::text = 'desc' THEN chirps.created_at END DESC,
+  chirps.created_at ASC
 `
 
-func (q *Queries) GetAllPosts(ctx context.Context) ([]Chirp, error) {
-	rows, err := q.db.QueryContext(ctx, getAllPosts)
+func (q *Queries) GetAllPosts(ctx context.Context, sortDir string) ([]Chirp, error) {
+	rows, err := q.db.QueryContext(ctx, getAllPosts, sortDir)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Chirp
+	for rows.Next() {
+		var i Chirp
+		if err := rows.Scan(
+			&i.ID,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.Body,
+			&i.UserID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const getAllPostsByAuthor = `-- name: GetAllPostsByAuthor :many
+SELECT id, created_at, updated_at, body, user_id
+FROM chirps
+WHERE user_id = $1
+ORDER BY
+CASE WHEN $2::text = 'asc' THEN chirps.created_at END ASC,
+CASE WHEN $2::text = 'desc' THEN chirps.created_at END DESC,
+  chirps.created_at ASC
+`
+
+type GetAllPostsByAuthorParams struct {
+	UserID  uuid.UUID `json:"user_id"`
+	SortDir string    `json:"sort_dir"`
+}
+
+func (q *Queries) GetAllPostsByAuthor(ctx context.Context, arg GetAllPostsByAuthorParams) ([]Chirp, error) {
+	rows, err := q.db.QueryContext(ctx, getAllPostsByAuthor, arg.UserID, arg.SortDir)
 	if err != nil {
 		return nil, err
 	}
